@@ -1,155 +1,98 @@
-import sqlite3
 import random
 import time
-import pandas as pd
+import sqlite3
 import streamlit as st
-import plotly.express as px
-from datetime import datetime
 
-# ----------------------------
-# Database Helper Functions
-# ----------------------------
-def init_db():
-    """Initialize the SQLite database and create the searches table if it doesn't exist."""
-    conn = sqlite3.connect("search_results.db", check_same_thread=False)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS searches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            method TEXT,
-            list_size INTEGER,
-            target INTEGER,
-            result_index INTEGER,
-            exec_time REAL,
-            timestamp TEXT
-        )
-    ''')
+# Set up the SQLite database connection
+def setup_database():
+    conn = sqlite3.connect('search_performance.db')
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS search_stats (
+                        id INTEGER PRIMARY KEY,
+                        method TEXT,
+                        target INTEGER,
+                        list_length INTEGER,
+                        time_taken REAL)''')
     conn.commit()
-    return conn, c
+    return conn, cursor
 
-def store_search_result(conn, method, list_size, target, result_index, exec_time):
-    """Store search result in the database."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with conn:
-        conn.execute('''
-            INSERT INTO searches (method, list_size, target, result_index, exec_time, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (method, list_size, target, result_index, exec_time, timestamp))
+# Naive search: scans the entire list for the target
+def naive_search(l, target):
+    for i in range(len(l)):
+        if l[i] == target:
+            return i
+    return -1
 
-def fetch_recent_searches(conn, limit=100):
-    """Fetch the most recent search results."""
-    return pd.read_sql(f"SELECT * FROM searches ORDER BY timestamp DESC LIMIT {limit}", conn)
+# Binary search: efficient search leveraging the sorted property of the list
+def binary_search(l, target, low=None, high=None):
+    if low is None:
+        low = 0
+    if high is None:
+        high = len(l) - 1
 
-# ----------------------------
-# Search Algorithm Functions
-# ----------------------------
-def binary_search(arr, target):
-    """Perform binary search on a sorted array."""
-    low, high = 0, len(arr) - 1
-    while low <= high:
-        mid = (low + high) // 2
-        if arr[mid] == target:
-            return mid  # Target found
-        elif arr[mid] > target:
-            high = mid - 1
-        else:
-            low = mid + 1
-    return -1  # Target not found
+    if high < low:
+        return -1
 
-# ----------------------------
-# Streamlit UI Setup
-# ----------------------------
-def display_sidebar():
-    """Display sidebar widgets for user input."""
-    st.sidebar.header("Search Parameters")
-    list_size = st.sidebar.slider("Select List Size", 100, 5000, 1000, step=100)
-    target = st.sidebar.number_input("Enter Target Number", value=random.randint(-3 * list_size, 3 * list_size))
-    mode = st.sidebar.radio("Select Mode", ["Single Search", "Compare Multiple Searches"])
-    return list_size, target, mode
+    midpoint = (low + high) // 2
 
-def display_results(index, target, exec_time):
-    """Display results after search execution."""
-    if index != -1:
-        st.success(f"Target {target} found at index {index}.")
+    if l[midpoint] == target:
+        return midpoint
+    elif target < l[midpoint]:
+        return binary_search(l, target, low, midpoint-1)
     else:
-        st.error(f"Target {target} not found in the list.")
-    st.info(f"Execution Time: {exec_time:.6f} seconds")
+        return binary_search(l, target, midpoint+1, high)
 
-def display_performance_metrics(df):
-    """Display a bar chart of binary search performance metrics."""
-    if not df.empty:
-        fig = px.bar(
-            df,
-            x="timestamp",
-            y="exec_time",
-            color="method",
-            barmode="group",
-            title="Binary Search Execution Times",
-            labels={"exec_time": "Execution Time (seconds)"}
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No search data available. Please perform a search above.")
+# Function to log search statistics to SQLite
+def log_search_stats(cursor, method, target, list_length, time_taken):
+    cursor.execute("INSERT INTO search_stats (method, target, list_length, time_taken) VALUES (?, ?, ?, ?)", 
+                   (method, target, list_length, time_taken))
+    cursor.connection.commit()
 
-def display_search_history(df):
-    """Display a table of the recent search history."""
-    st.markdown("### Search History")
-    method_filter = st.selectbox("Filter by Method", ["All", "Binary Search"])
-    list_size_filter = st.slider("Filter by List Size", 100, 5000, 1000, step=100)
-    filtered_df = df[
-        (df["list_size"] == list_size_filter) & 
-        (df["method"] == method_filter if method_filter != "All" else df["method"])
-    ]
-    st.dataframe(filtered_df.tail(50), use_container_width=True)
+# Function to display performance statistics from the SQLite database
+def display_performance_stats(cursor):
+    cursor.execute("SELECT method, AVG(time_taken) as avg_time, COUNT(*) as num_searches FROM search_stats GROUP BY method")
+    results = cursor.fetchall()
+    st.write("### Performance Summary")
+    for row in results:
+        st.write(f"Method: {row[0]}, Average Time: {row[1]:.6f} seconds, Number of Searches: {row[2]}")
+
+# Streamlit app interface
+def main():
+    st.title("Search Algorithm Performance: Naive vs Binary Search")
     
-    # Export Button
-    st.download_button(
-        "Download Search History as CSV",
-        filtered_df.to_csv(index=False).encode(),
-        "search_history.csv",
-        "text/csv"
-    )
+    # Set up database
+    conn, cursor = setup_database()
 
-# ----------------------------
-# Main App Function
-# ----------------------------
-def run_app():
-    """Run the main Streamlit app."""
-    st.set_page_config(page_title="Binary Search Performance", layout="wide")
-    st.title("Binary Search with Performance Metrics")
+    # User input for list length and target number
+    length = st.slider("Choose List Length", 1000, 10000, 5000, step=1000)
+    target = st.number_input("Enter Target Value", min_value=-3*length, max_value=3*length, value=100)
     
-    # Sidebar widgets for user input
-    list_size, target, mode = display_sidebar()
+    # Generate sorted list
+    sorted_list = sorted(random.sample(range(-3*length, 3*length), length))
 
-    # Button to trigger search
-    if st.sidebar.button("Run Search"):
-        # Initialize database
-        conn, _ = init_db()
-        
-        # Generate a sorted list of random integers
-        sorted_list = sorted(random.sample(range(-3 * list_size, 3 * list_size), list_size))
-        
-        # Track search execution time
+    # Radio buttons to select the search method
+    search_method = st.radio("Select Search Method", ("Naive Search", "Binary Search"))
+
+    # Display and time the search based on selected method
+    if st.button("Run Search"):
         start_time = time.time()
-        index = binary_search(sorted_list, target)
+        if search_method == "Naive Search":
+            naive_search(sorted_list, target)
+        else:
+            binary_search(sorted_list, target)
         end_time = time.time()
-        exec_time = end_time - start_time
+        
+        time_taken = end_time - start_time
+        st.write(f"Search time: {time_taken:.6f} seconds")
+        
+        # Log the search stats to the database
+        log_search_stats(cursor, search_method, target, length, time_taken)
 
-        # Store the result in the database
-        store_search_result(conn, "Binary Search", list_size, target, index, exec_time)
+    # Display search performance statistics from the database
+    display_performance_stats(cursor)
 
-        # Display search result and execution time
-        display_results(index, target, exec_time)
+    # Close the SQLite connection
+    conn.close()
 
-        # Close the database connection
-        conn.close()
-
-    # Fetch recent search results and display performance metrics
-    with sqlite3.connect("search_results.db", check_same_thread=False) as conn:
-        df = fetch_recent_searches(conn)
-        display_performance_metrics(df)
-        display_search_history(df)
-
-# Run the Streamlit app
 if __name__ == "__main__":
-    run_app()
+    main()
